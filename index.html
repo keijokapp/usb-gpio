@@ -2,117 +2,25 @@
 <head>
 	<meta charset="utf-8"/>
 	<title>USB GPIO</title>
+	<style>
+	body, #graph {
+		margin: 0;
+		padding: 0;
+		border: 0;
+	}
+	
+	#graph {
+		width: 100%;
+		height: 100%;
+	}
+	</style>
 </head>
 <body>
+	<div id="draw"></div>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/svg.js/2.7.1/svg.min.js"></script>
+	<script src="port.js"></script>
 	<script>
-class Port {
-
-	static async getPorts() {
-		const devices = await navigator.usb.getDevices();
-		return devices.map(device => new Port(device));
-	};
-
-	static async requestPort() {
-		const filters = [
-			{ 'vendorId': 0x2341, 'productId': 0x8036 },
-			{ 'vendorId': 0x2341, 'productId': 0x8037 },
-			{ 'vendorId': 0x2341, 'productId': 0x804d },
-			{ 'vendorId': 0x2341, 'productId': 0x804e },
-			{ 'vendorId': 0x2341, 'productId': 0x804f },
-			{ 'vendorId': 0x2341, 'productId': 0x8050 },
-		];
-
-		const device = await navigator.usb.requestDevice({ filters });
-
-		return new Port(device);
-	}
-
-	constructor(device) {
-		this.device_ = device
-	}
-
-	async open() {
-		await this.device_.open()
-
-		if(this.device_.configuration === null) {
-			await this.device_.selectConfiguration(1);
-		}
-
-		console.log(this.device_.configurations);
-
-		for(const iface of this.device_.configuration.interfaces) {
-			console.log('Interface %d:', iface.interfaceNumber, iface);
-			for(const alt of iface.alternates) {
-				const matches = alt.interfaceClass === 0xff;
-				console.log('Alternate:', alt);
-				if(matches) {
-					this.interfaceNumber_ = iface.interfaceNumber;
-				}
-				for(const endpoint of alt.endpoints) {
-					console.log('Endpoint %d:', endpoint.endpointNumber, endpoint);
-					if(matches && endpoint.direction == 'out') {
-						this.endpointOut_ = endpoint.endpointNumber;
-					}
-					if(matches && endpoint.direction == 'in') {
-						this.endpointIn_ = endpoint.endpointNumber;
-					}
-				}
-			}
-		}
-
-		await this.device_.claimInterface(this.interfaceNumber_);
-		await this.device_.selectAlternateInterface(this.interfaceNumber_, 0);
-		await this.device_.controlTransferOut({
-			requestType: 'class',
-			recipient: 'interface',
-			request: 0x22,
-			value: 0x01,
-			index: this.interfaceNumber_
-		});
-	}
-
-	read(cb) {
-		let reading = true;
-		function stop() {
-			reading = false;
-		}
-
-		const loop = async () => {
-			while(reading) {
-				try {
-					const result = await this.device_.transferIn(this.endpointIn_, 64);
-					cb(null, result.data);
-				} catch(e) {
-					cb(e);
-					break;
-				}
-			}
-		};
-
-		loop();
-
-		return stop;
-	}
-
-	async close() {
-		await this.device_.controlTransferOut({
-			requestType: 'class',
-			recipient: 'interface',
-			request: 0x22,
-			value: 0x00,
-			index: this.interfaceNumber_
-		});
-		await this.device_.close();
-	}
-
-	async send(data) {
-		const buffer = Uint8Array.from(data);
-		return this.device_.transferOut(this.endpointOut_, buffer);
-	}
-
-}
-
-(async function() {
+/*(async function() {
 	var device = (await Port.getPorts())[0];
 	await device.open();
 	device.read((e, d) => {
@@ -124,7 +32,157 @@ class Port {
 		}
 	});
 	window.device = device;
-})().catch(e => console.error(e.message));
+})().catch(e => console.error(e.message));*/
+
+function assert(condition, message) {
+	if(!condition) {
+		throw new Error(message);
+	}
+}
+
+const PIN_COUNT = 6;
+const VAR_COUNT = 4;
+
+
+function andGate(draw, inputs = []) {
+	assert(Array.isArray(inputs));
+	
+	const baseGroup = draw.group();
+	baseGroup.path('M 80 30 L 100 30').stroke('black')
+	baseGroup.path('M 20 0 L 50 0 C 66.57 0 80 13.43 80 30 C 80 46.57 66.57 60 50 60 L 20 60 Z').fill('white').stroke('black');
+	baseGroup.scale(0.5, 0.5);
+	const inputsGroup = baseGroup.group();
+
+	function drawInputs() {
+		const points = inputs.map((inverted, i) => {
+			const y = baseGroup.inputOffset(i);
+			return `M 0 ${y} L 20 ${y}`;
+		});
+		inputsGroup.clear();
+		inputsGroup.path(points.join(' ')).stroke('black');
+		inputs.forEach((inverted, i) => {
+			if(inverted) {
+				const y = baseGroup.inputOffset(i);
+				inputsGroup.circle(6).fill('white').stroke('black').move(14, y - 3);
+			}
+		});
+	}
+
+	baseGroup.inputOffset = function inputOffset(inputIndex) {
+		assert(inputIndex < inputs.length);
+		const inputPadding = 60 / inputs.length;
+		return inputIndex * inputPadding + inputPadding / 2;
+	}
+
+	baseGroup.setInputs = function setInputs(inputs_) {
+		assert(Array.isArray(inputs_));
+		inputs = inputs_;
+		drawInputs();
+		return this;
+	}
+	
+	drawInputs();
+	return baseGroup;
+}
+
+
+function orGate(draw, inputs = []) {
+	assert(Array.isArray(inputs));
+	
+	const baseGroup = draw.group();
+	baseGroup.path('M 80 30 L 100 30').stroke('black')
+	baseGroup.path('M 40 0 C 57.47 0.56 73.06 12.25 80 30 C 73.06 47.75 57.47 59.44 40 60 L 15 60 C 25.72 41.44 25.72 18.56 15 0 Z').fill('white').stroke('black');
+	baseGroup.scale(0.5, 0.5);
+	const inputsGroup = baseGroup.group();
+
+	function drawInputs() {
+		const points = inputs.map((inverted, i) => {
+			const y = baseGroup.inputOffset(i);
+			return `M 0 ${y} L 20 ${y}`;
+		});
+		inputsGroup.clear();
+		inputsGroup.path(points.join(' ')).stroke('black');
+		inputs.forEach((inverted, i) => {
+			if(inverted) {
+				const y = baseGroup.inputOffset(i);
+				inputsGroup.circle(6).fill('white').stroke('black').move(14, y - 3);
+			}
+		});
+	}
+
+	baseGroup.inputOffset = function inputOffset(inputIndex) {
+		assert(inputIndex < inputs.length);
+		const inputPadding = 60 / inputs.length;
+		return inputIndex * inputPadding + inputPadding / 2;
+	}
+
+	baseGroup.setInputs = function setInputs(inputs_) {
+		assert(Array.isArray(inputs_));
+		inputs = inputs_;
+		drawInputs();
+		return this;
+	}
+	
+	drawInputs();
+	return baseGroup;
+}
+
+class Draw {
+
+	constructor(containerId) {
+		const that = this;
+	
+		this._draw = SVG(containerId);
+		this._inputs = [];
+		this._outputs = [];
+
+		for(let i = 0; i < 6; i++) {
+			const input = this._draw.group();
+			input.circle(28).fill('white').stroke({ color: 'blue', width: 2 });
+			input.circle(16).fill('red').move(6, 6);
+			input.move(0, i * 40);
+			input.click(function() {
+				const index = that._inputs.indexOf(this);
+				console.log(index);
+			})
+			this._inputs.push(input);
+
+			const output = this._draw.group();
+			output.circle(28).fill('white').stroke({ color: 'blue', width: 2 });
+			output.circle(16).fill('green').move(6, 6);
+			output.move(400, i * 40);
+			output.click(function() {
+				const index = that._outputs.indexOf(this);
+				console.log(index);
+			})
+			this._outputs.push(output);
+		}
+	}
+	
+	addAndGate(inverted = false) {
+		return andGate(this._draw, [inverted]);
+	}
+	
+	addOrGate(inverted = false) {
+		return orGate(this._draw, [inverted]);
+	}
+	
+	addXorGate(inverted = false) {
+		return xorGate(this._draw, [inverted]);
+	}
+	
+	parseFormula(formula) {
+		
+	}
+}
+
+const draw = new Draw('draw');
+
+function operatorDepths(formula) {
+	for(let i = 0; i < formula.length; i++) {
+		
+	}
+}
 
 	</script>
 </body>
